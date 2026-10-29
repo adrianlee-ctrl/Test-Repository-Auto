@@ -1,9 +1,9 @@
 /**
- * EXPERIMENTATION REPOSITORY AUTOMATIONS  (Audience Development tab)
+ * EXPERIMENTATION REPOSITORY AUTOMATIONS
  * -------------------------------------------------------------------
  * Runs once a week (Tuesday morning by default).
  *
- * 1. Lead emails (one per lead, only when there is something to say)
+ * 1. Lead emails  (Audience Development tab only)
  *    - "Launching within 3 weeks": sent ONCE per test, in the first weekly email
  *      where the Live Date is 21 days away or less. A new reminder goes out only
  *      if the Live Date changes.
@@ -11,22 +11,22 @@
  *      Date has passed and Status is still Planning / Design / In Development.
  *    Status is never changed automatically. Overdue rows are also highlighted.
  *
- * 2. Weekly calendar summary (for the "Experimentation Calendar" slide)
- *    One email to the people in SUMMARY_RECIPIENTS, laid out like the slide:
- *    Recently Ended / Recently Launched / Upcoming / Delays, with fiscal weeks.
- *    Each cell can be copied straight into the slide table.
+ * 2. Weekly calendar summary  (EVERY test tab in the repository)
+ *    One email to the people in SUMMARY_RECIPIENTS, laid out like the
+ *    Experimentation Calendar slide: Recently Ended / Recently Launched /
+ *    Upcoming / Delays, with fiscal weeks. Each cell can be copied into the slide.
  *
  * 3. "Launched Last 7 Days" tab: a live formula, updates on its own.
  *
- * 4. Jira (optional, read-only): shows each test's Jira ticket status in the lead
- *    emails, using the free "Jira Cloud for Sheets" add-on.
+ * 4. Jira (optional, read-only): shows each Audience test's Jira ticket status
+ *    in the lead emails, using the free "Jira Cloud for Sheets" add-on.
  *
  * Lead emails are read from the name chips (@-mentions) in the Marketing Lead column.
  * Settings you may want to change are all in CONFIG below.
  */
 
 const CONFIG = {
-  // ---- Where the data lives ----
+  // ---- Where the data lives (lead emails, highlighting, Jira) ----
   TAB_NAME: 'Audience Development',
   HEADER_ROW: 2,       // row with column names
   FIRST_DATA_ROW: 3,   // first row of tests
@@ -72,11 +72,15 @@ const CONFIG = {
   CC: '',              // optional, e.g. 'you@company.com'
   TEST_RECIPIENT: '',  // blank = whoever clicks "Send this week's emails to me"
 
-  // ---- Weekly calendar summary (slide-ready) ----
+  // ---- Weekly calendar summary (slide-ready, covers the whole repository) ----
   SUMMARY_RECIPIENTS: [],      // e.g. ['manager@company.com']
   SUMMARY_INCLUDE_OWNER: true, // also send it to whoever turned the weekly emails on
+  CALENDAR_URL: 'https://docs.google.com/presentation/d/1zDeD_6ML8_5Y2DkrJFNr4L101Ubmuy1v8AGzDa9Wl84/edit?slide=id.g3f535163ecd_0_0#slide=id.g3f535163ecd_0_0',
+  SUMMARY_TABS: [],            // blank = every tab with Experiment Name, Status and Live Date columns
+  SUMMARY_EXCLUDE_TABS: [],    // tabs to leave out, e.g. ['Archive', 'Template']
+  SUMMARY_SKIP_HIDDEN_TABS: true,
+  TEAM_LABELS: { 'Audience Development': 'Audience' }, // team name used when the Marketing Team cell is blank (otherwise the tab name)
   FISCAL_YEAR_START: '2026-06-29', // Monday that starts FW1 (FY27). Update when FY28 begins.
-  DEFAULT_TEAM: 'Audience',    // used when the Marketing Team cell is blank
 
   // ---- Jira (Jira Cloud for Sheets add-on) ----
   JIRA_ENABLED: true,
@@ -172,7 +176,7 @@ function previewThisWeek() {
   const keys = readLogKeys_(ctx.ss);
   const plan = buildPlan_(ctx, keys);
   const summary = buildSummary_(ctx);
-  showMessage_("Preview: this week's emails", describePlan_(ctx, plan) + '\n' + describeSummary_(ctx, summary, keys));
+  showMessage_("Preview: this week's emails", describePlan_(ctx, plan) + '\n' + describeSummary_(ctx, summary));
 }
 
 /** Sends this week's emails (lead emails + calendar summary) to you. Nothing is recorded as sent. */
@@ -229,89 +233,101 @@ function dailyRun() {
 
 /* =========================  READING THE SHEET  ========================= */
 
+/** Loads the Audience Development tab (used for lead emails, highlighting and Jira). */
 function loadContext_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = findSheet_(ss, CONFIG.TAB_NAME);
   if (!sheet) throw new Error('Could not find a tab named "' + CONFIG.TAB_NAME + '". Update CONFIG.TAB_NAME.');
   const tz = ss.getSpreadsheetTimeZone();
-  const lastCol = sheet.getLastColumn();
-  const lastRow = sheet.getLastRow();
-  const headers = sheet.getRange(CONFIG.HEADER_ROW, 1, 1, lastCol).getDisplayValues()[0];
-  const cols = findColumns_(headers);
-  const numRows = Math.max(0, lastRow - CONFIG.FIRST_DATA_ROW + 1);
+  const headers = sheet.getRange(CONFIG.HEADER_ROW, 1, 1, Math.max(1, sheet.getLastColumn())).getDisplayValues()[0];
+  const cols = findColumns_(headers, true);
+  const rows = readTestRows_(ss, sheet, tz, cols, CONFIG.FIRST_DATA_ROW, true);
   const today = today_(tz);
-  const rows = [];
-
-  if (numRows > 0) {
-    const range = sheet.getRange(CONFIG.FIRST_DATA_ROW, 1, numRows, lastCol);
-    const values = range.getValues();
-    const display = range.getDisplayValues();
-    const leadEmails = readLeadEmails_(ss, sheet, cols.lead, numRows, display);
-    const trackerLinks = readCellLinks_(ss, sheet, cols.tracker, numRows);
-    const planLinks = readCellLinks_(ss, sheet, cols.plan, numRows);
-    const cell = function (i, key) { return cols[key] ? String(display[i][cols[key] - 1]).trim() : ''; };
-
-    for (let i = 0; i < numRows; i++) {
-      const id = cell(i, 'id');
-      if (!id) continue;
-      const leadText = cell(i, 'lead');
-      rows.push({
-        rowNumber: CONFIG.FIRST_DATA_ROW + i,
-        id: id,
-        name: cell(i, 'name'),
-        status: cell(i, 'status'),
-        leadText: leadText,
-        team: cell(i, 'team'),
-        description: cell(i, 'description'),
-        result: cell(i, 'result'),
-        conversion: cell(i, 'conversion'),
-        registration: cell(i, 'registration'),
-        liveYmd: toYmd_(values[i][cols.liveDate - 1], tz),
-        endYmd: cols.endDate ? toYmd_(values[i][cols.endDate - 1], tz) : null,
-        link: trackerLinks[i][0] || planLinks[i][0] || '',
-        jiraKeys: findJiraKeys_(cell(i, 'jira'), cell(i, 'plan'), planLinks[i]),
-        emails: leadEmails[i].emails,
-        emailSources: leadEmails[i].sources,
-        skipped: isSkippedLead_(leadText),
-      });
-    }
-  }
-  const ctx = { ss: ss, sheet: sheet, tz: tz, cols: cols, rows: rows, lastCol: lastCol, today: today, weekStart: weekStart_(today) };
+  const ctx = { ss: ss, sheet: sheet, tz: tz, cols: cols, rows: rows, lastCol: sheet.getLastColumn(), today: today, weekStart: weekStart_(today) };
   ctx.jira = CONFIG.JIRA_ENABLED ? readJiraData_(ss) : { ok: false, missingTab: true, byKey: {} };
   return ctx;
 }
 
-function findColumns_(headers) {
+/** Reads the tests on one tab. withLeads = also look up lead emails (Audience tab only). */
+function readTestRows_(ss, sheet, tz, cols, firstRow, withLeads) {
+  const lastCol = sheet.getLastColumn();
+  const numRows = Math.max(0, sheet.getLastRow() - firstRow + 1);
+  const rows = [];
+  if (numRows < 1 || lastCol < 1) return rows;
+
+  const range = sheet.getRange(firstRow, 1, numRows, lastCol);
+  const values = range.getValues();
+  const display = range.getDisplayValues();
+  const leadEmails = withLeads ? readLeadEmails_(ss, sheet, cols.lead, firstRow, numRows, display) : null;
+  const trackerLinks = readCellLinks_(ss, sheet, cols.tracker, firstRow, numRows);
+  const planLinks = readCellLinks_(ss, sheet, cols.plan, firstRow, numRows);
+  const cell = function (i, key) { return cols[key] ? String(display[i][cols[key] - 1]).trim() : ''; };
+  const sheetName = sheet.getName();
+
+  for (let i = 0; i < numRows; i++) {
+    const id = cell(i, 'id');
+    const name = cell(i, 'name');
+    if (withLeads ? !id : !name) continue;
+    const leadText = cell(i, 'lead');
+    rows.push({
+      sheetName: sheetName,
+      sheetId: sheet.getSheetId(),
+      rowNumber: firstRow + i,
+      id: id,
+      name: name,
+      status: cell(i, 'status'),
+      leadText: leadText,
+      team: cell(i, 'team') || CONFIG.TEAM_LABELS[sheetName] || sheetName,
+      description: cell(i, 'description'),
+      result: cell(i, 'result'),
+      conversion: cell(i, 'conversion'),
+      registration: cell(i, 'registration'),
+      liveYmd: toYmd_(values[i][cols.liveDate - 1], tz),
+      endYmd: cols.endDate ? toYmd_(values[i][cols.endDate - 1], tz) : null,
+      link: trackerLinks[i][0] || planLinks[i][0] || '',
+      jiraKeys: findJiraKeys_(cell(i, 'jira'), cell(i, 'plan'), planLinks[i]),
+      emails: leadEmails ? leadEmails[i].emails : [],
+      emailSources: leadEmails ? leadEmails[i].sources : [],
+      skipped: isSkippedLead_(leadText),
+    });
+  }
+  return rows;
+}
+
+/** strict = throw if a required column is missing (Audience tab). Otherwise returns null. */
+function findColumns_(headers, strict) {
   const norm = function (s) { return String(s).split('\n')[0].trim().toLowerCase(); };
   const index = {};
   headers.forEach(function (h, i) {
     const k = norm(h);
     if (k && !(k in index)) index[k] = i + 1;
   });
-  const required = ['id', 'name', 'lead', 'status', 'liveDate'];
+  const required = strict ? ['id', 'name', 'lead', 'status', 'liveDate'] : ['name', 'status', 'liveDate'];
   const cols = {};
+  let missing = null;
   Object.keys(CONFIG.COLUMNS).forEach(function (key) {
     const want = norm(CONFIG.COLUMNS[key]);
     let col = index[want];
     if (!col) {
       Object.keys(index).forEach(function (k) { if (!col && k.indexOf(want) === 0) col = index[k]; });
     }
-    if (!col && required.indexOf(key) !== -1) {
-      throw new Error('Could not find a column called "' + CONFIG.COLUMNS[key] + '" in row ' + CONFIG.HEADER_ROW +
-        ' of "' + CONFIG.TAB_NAME + '". If it was renamed, update CONFIG.COLUMNS.');
-    }
+    if (!col && required.indexOf(key) !== -1 && !missing) missing = CONFIG.COLUMNS[key];
     cols[key] = col || null;
   });
+  if (missing) {
+    if (!strict) return null;
+    throw new Error('Could not find a column called "' + missing + '" in row ' + CONFIG.HEADER_ROW +
+      ' of "' + CONFIG.TAB_NAME + '". If it was renamed, update CONFIG.COLUMNS.');
+  }
   return cols;
 }
 
 /** Reads cells through the Google Sheets API (needed for name chips and file chips). Returns null if unavailable. */
-function fetchApiCells_(ss, sheet, col, numRows) {
+function fetchApiCells_(ss, sheet, col, firstRow, numRows) {
   if (typeof Sheets === 'undefined' || !col || numRows < 1) return null;
   try {
     const letter = colLetter_(col);
-    const first = CONFIG.FIRST_DATA_ROW;
-    const a1 = quoteSheet_(sheet.getName()) + '!' + letter + first + ':' + letter + (first + numRows - 1);
+    const a1 = quoteSheet_(sheet.getName()) + '!' + letter + firstRow + ':' + letter + (firstRow + numRows - 1);
     const resp = Sheets.Spreadsheets.get(ss.getId(), {
       ranges: [a1],
       fields: 'sheets.data.rowData.values(chipRuns,hyperlink,textFormatRuns)',
@@ -332,9 +348,10 @@ function fetchApiCells_(ss, sheet, col, numRows) {
  * Finds the email(s) behind each Marketing Lead cell. Checks, in order:
  * name chips, mailto links, cell notes, emails typed in the cell, and the optional Leads tab.
  */
-function readLeadEmails_(ss, sheet, col, numRows, display) {
+function readLeadEmails_(ss, sheet, col, firstRow, numRows, display) {
   const out = [];
   for (let i = 0; i < numRows; i++) out.push({ emails: [], sources: [] });
+  if (!col) return out;
   const add = function (i, email, source) {
     if (!email || !out[i]) return;
     email = String(email).replace(/^mailto:/i, '').split('?')[0].trim().toLowerCase();
@@ -342,10 +359,10 @@ function readLeadEmails_(ss, sheet, col, numRows, display) {
     if (out[i].emails.indexOf(email) === -1) out[i].emails.push(email);
     if (out[i].sources.indexOf(source) === -1) out[i].sources.push(source);
   };
-  const range = sheet.getRange(CONFIG.FIRST_DATA_ROW, col, numRows, 1);
+  const range = sheet.getRange(firstRow, col, numRows, 1);
 
   // 1. Name chips (needs the "Google Sheets API" service added in Apps Script)
-  const api = fetchApiCells_(ss, sheet, col, numRows);
+  const api = fetchApiCells_(ss, sheet, col, firstRow, numRows);
   if (api) {
     api.forEach(function (cell, i) {
       (cell.chipRuns || []).forEach(function (run) {
@@ -392,14 +409,14 @@ function readLeadEmails_(ss, sheet, col, numRows, display) {
 }
 
 /** Returns every web link in each cell of a column (file chips, hyperlinks, linked text). */
-function readCellLinks_(ss, sheet, col, numRows) {
+function readCellLinks_(ss, sheet, col, firstRow, numRows) {
   const out = [];
   for (let i = 0; i < numRows; i++) out.push([]);
   if (!col || numRows < 1) return out;
   const add = function (i, url) {
     if (url && /^https?:/i.test(url) && out[i].indexOf(url) === -1) out[i].push(url);
   };
-  const api = fetchApiCells_(ss, sheet, col, numRows);
+  const api = fetchApiCells_(ss, sheet, col, firstRow, numRows);
   if (api) {
     api.forEach(function (cell, i) {
       (cell.chipRuns || []).forEach(function (run) {
@@ -413,7 +430,7 @@ function readCellLinks_(ss, sheet, col, numRows) {
     });
   }
   try {
-    sheet.getRange(CONFIG.FIRST_DATA_ROW, col, numRows, 1).getRichTextValues().forEach(function (row, i) {
+    sheet.getRange(firstRow, col, numRows, 1).getRichTextValues().forEach(function (row, i) {
       const rtv = row[0];
       if (!rtv) return;
       rtv.getRuns().forEach(function (run) { add(i, run.getLinkUrl()); });
@@ -473,7 +490,7 @@ function buildPlan_(ctx, logKeys) {
 }
 
 function describePlan_(ctx, plan) {
-  const lines = ['Week of ' + fmtYmd_(ctx.weekStart) + ' (' + fwLabel_(ctx.today) + ')', '', 'LEAD EMAILS'];
+  const lines = ['Week of ' + fmtYmd_(ctx.weekStart) + ' (' + fwLabel_(ctx.today) + ')', '', 'LEAD EMAILS (' + CONFIG.TAB_NAME + ')'];
   const people = Object.keys(plan.byPerson);
   if (!people.length) lines.push('No lead emails this week.');
   people.forEach(function (email) {
@@ -595,42 +612,94 @@ function textLine_(ctx, it) {
   return s;
 }
 
-/* =========================  WEEKLY CALENDAR SUMMARY  ========================= */
+/* =========================  WEEKLY CALENDAR SUMMARY (whole repository)  ========================= */
+
+/** Finds every tab that holds tests. Returns { used: [{sheet, cols, firstRow}], skipped: [{name, reason}] }. */
+function findSummaryTabs_(ss) {
+  const norm = function (s) { return String(s).replace(/\s+/g, ' ').trim().toLowerCase(); };
+  const own = [CONFIG.LAUNCH_TAB, CONFIG.LOG_TAB, CONFIG.JIRA_TAB, CONFIG.LEADS_TAB].map(norm);
+  const excluded = CONFIG.SUMMARY_EXCLUDE_TABS.map(norm);
+  const only = CONFIG.SUMMARY_TABS.map(norm);
+  const out = { used: [], skipped: [] };
+
+  ss.getSheets().forEach(function (sh) {
+    const name = sh.getName();
+    const n = norm(name);
+    if (own.indexOf(n) !== -1) return; // tabs this script made
+    if (only.length && only.indexOf(n) === -1) { out.skipped.push({ name: name, reason: 'not in SUMMARY_TABS' }); return; }
+    if (excluded.indexOf(n) !== -1) { out.skipped.push({ name: name, reason: 'in SUMMARY_EXCLUDE_TABS' }); return; }
+    if (!only.length && CONFIG.SUMMARY_SKIP_HIDDEN_TABS && sh.isSheetHidden()) { out.skipped.push({ name: name, reason: 'hidden tab' }); return; }
+    const lastCol = sh.getLastColumn();
+    if (sh.getLastRow() < 2 || lastCol < 1) { out.skipped.push({ name: name, reason: 'empty' }); return; }
+
+    // The column headings may be in any of the first 6 rows
+    const top = sh.getRange(1, 1, Math.min(6, sh.getLastRow()), lastCol).getDisplayValues();
+    for (let r = 0; r < top.length; r++) {
+      const cols = findColumns_(top[r], false);
+      if (cols) { out.used.push({ sheet: sh, cols: cols, firstRow: r + 2 }); return; }
+    }
+    out.skipped.push({ name: name, reason: 'no Experiment Name / Status / Live Date headings' });
+  });
+  return out;
+}
+
+/** Gathers tests from every summary tab, dropping repeats (same Identifier, or same name and Live Date). */
+function loadSummaryRows_(ctx) {
+  const tabs = findSummaryTabs_(ctx.ss);
+  const seen = {};
+  const rows = [];
+  let duplicates = 0;
+  tabs.used.forEach(function (t) {
+    const tabRows = t.sheet.getSheetId() === ctx.sheet.getSheetId()
+      ? ctx.rows
+      : readTestRows_(ctx.ss, t.sheet, ctx.tz, t.cols, t.firstRow, false);
+    t.count = tabRows.length;
+    tabRows.forEach(function (r) {
+      const key = r.id ? 'id:' + r.id.toLowerCase() : 'name:' + r.name.toLowerCase() + '|' + (r.liveYmd || '');
+      if (seen[key]) { duplicates++; return; }
+      seen[key] = true;
+      rows.push(r);
+    });
+  });
+  return { rows: rows, tabs: tabs, duplicates: duplicates };
+}
 
 /**
  * Sorts tests into the four slide sections for the current fiscal week:
  *  Recently Ended    End Date in the previous fiscal week or this week so far
- *  Recently Launched Live Date in the previous fiscal week or this week so far, Status In-Flight/Complete
+ *  Recently Launched Live Date in the previous fiscal week or this week so far, and no longer in a planning status
  *  Upcoming          Live Date from tomorrow to the end of next fiscal week
  *  Delays            Live Date has passed but Status is still Planning / Design / In Development
  */
 function buildSummary_(ctx) {
+  const data = loadSummaryRows_(ctx);
   const pre = lowerList_(CONFIG.REMINDER_STATUSES.concat(CONFIG.LAUNCH_CHECK_STATUSES));
   const checkStatuses = lowerList_(CONFIG.LAUNCH_CHECK_STATUSES);
   const closed = ['cancelled', 'canceled', 'duplicate'];
   const prevStart = addDays_(ctx.weekStart, -7);
   const nextEnd = addDays_(ctx.weekStart, 13);
-  const s = { ended: [], launched: [], upcoming: [], delays: [] };
+  const s = { ended: [], launched: [], upcoming: [], delays: [], tabs: data.tabs, duplicates: data.duplicates };
 
-  ctx.rows.forEach(function (r) {
+  data.rows.forEach(function (r) {
     const status = r.status.toLowerCase();
     if (!status || closed.indexOf(status) !== -1) return;
     const isPre = pre.indexOf(status) !== -1;
     if (r.endYmd && !isPre && r.endYmd >= prevStart && r.endYmd <= ctx.today) {
-      s.ended.push({ row: r, text: 'Concluded ' + fwLabel_(r.endYmd) + '.' + resultText_(r) + descText_(r) });
+      s.ended.push({ row: r, date: r.endYmd, text: 'Concluded ' + fwLabel_(r.endYmd) + '.' + resultText_(r) + descText_(r) });
     }
     if (!r.liveYmd) return;
     if (!isPre && r.liveYmd >= prevStart && r.liveYmd <= ctx.today) {
-      s.launched.push({ row: r, text: 'Launched in ' + fwLabel_(r.liveYmd) + '.' + descText_(r) });
+      s.launched.push({ row: r, date: r.liveYmd, text: 'Launched in ' + fwLabel_(r.liveYmd) + '.' + descText_(r) });
     } else if (r.liveYmd > ctx.today && r.liveYmd <= nextEnd && status !== 'complete') {
-      s.upcoming.push({ row: r, text: 'Launching ' + fwLabel_(r.liveYmd) + '.' + descText_(r) });
+      s.upcoming.push({ row: r, date: r.liveYmd, text: 'Launching ' + fwLabel_(r.liveYmd) + '.' + descText_(r) });
     } else if (checkStatuses.indexOf(status) !== -1 && r.liveYmd < ctx.today) {
-      s.delays.push({ row: r, needsInput: true,
+      s.delays.push({ row: r, date: r.liveYmd,
         text: 'Planned for ' + fwLabel_(r.liveYmd) + ' (' + fmtYmd_(r.liveYmd) + ') but still marked ' + r.status + '. [Add the reason and new launch date.]' });
     }
   });
-  const byDate = function (k) { return function (a, b) { return String(a.row[k]).localeCompare(String(b.row[k])); }; };
-  s.ended.sort(byDate('endYmd')); s.launched.sort(byDate('liveYmd')); s.upcoming.sort(byDate('liveYmd')); s.delays.sort(byDate('liveYmd'));
+  // Group by team, then by date, so each team's rows sit together
+  const order = function (a, b) { return a.row.team.localeCompare(b.row.team) || String(a.date).localeCompare(String(b.date)); };
+  ['ended', 'launched', 'upcoming', 'delays'].forEach(function (k) { s[k].sort(order); });
   return s;
 }
 
@@ -642,10 +711,17 @@ function summaryRecipients_() {
   return out;
 }
 
-function describeSummary_(ctx, s, logKeys) {
+function describeSummary_(ctx, s) {
   const lines = ['', 'CALENDAR SUMMARY (' + fwLabel_(ctx.today) + ') to: ' + (summaryRecipients_().join(', ') || 'nobody, add SUMMARY_RECIPIENTS')];
+  lines.push('Tabs included: ' + (s.tabs.used.map(function (t) { return t.sheet.getName() + ' (' + t.count + ' tests)'; }).join(', ') || 'none'));
+  if (s.tabs.skipped.length) {
+    lines.push('Tabs skipped: ' + s.tabs.skipped.map(function (t) { return t.name + ' (' + t.reason + ')'; }).join(', '));
+  }
+  if (s.duplicates) lines.push(s.duplicates + ' test(s) appear on more than one tab and are listed once.');
   Object.keys(SECTION_STYLE_).forEach(function (k) {
-    lines.push('   ' + SECTION_STYLE_[k].title + ': ' + (s[k].length ? s[k].map(function (it) { return it.row.id; }).join(', ') : 'nothing this week'));
+    lines.push('   ' + SECTION_STYLE_[k].title + ': ' + (s[k].length
+      ? s[k].map(function (it) { return (it.row.id || it.row.name.slice(0, 25)) + ' [' + it.row.team + ']'; }).join(', ')
+      : 'nothing this week'));
   });
   return lines.join('\n');
 }
@@ -670,18 +746,25 @@ function composeSummary_(ctx, s, topNote) {
   const font = "'Public Sans',Arial,Helvetica,sans-serif";
   const border = '1px solid #B7B7B7';
   const fw = fwLabel_(ctx.today);
-  const subject = 'Experimentation Calendar draft: ' + CONFIG.DEFAULT_TEAM + ', ' + fw;
+  const subject = 'Experimentation Calendar draft: ' + fw;
+  const calLink = CONFIG.CALENDAR_URL
+    ? '<a href="' + CONFIG.CALENDAR_URL + '" style="color:#3197FE;">Experimentation Calendar</a>'
+    : 'Experimentation Calendar';
 
   let html = '<div style="font-family:' + font + ';color:#222;max-width:900px;">';
   if (topNote) html += '<div style="background:#FFF4CC;padding:8px 12px;margin-bottom:12px;font-size:13px;">' + topNote + '</div>';
-  html += '<p style="font-size:14px;margin:0 0 6px;"><b>' + escapeHtml_(CONFIG.DEFAULT_TEAM) + ' rows for the Experimentation Calendar slide, ' + fw +
-    ' (week of ' + fmtYmd_(ctx.weekStart) + ')</b></p>' +
-    '<p style="font-size:12px;color:#555;margin:0 0 12px;">Drafted from the <a href="' + repoUrl_(ctx) + '">repository</a>. ' +
-    'Copy a cell into the matching row of the slide table, or copy the whole table. The wording comes from each test\'s Description, so give it a quick edit. ' +
-    'Anything in [brackets] needs your input.</p>';
+  html += '<p style="font-size:14px;margin:0 0 6px;"><b>Rows for the ' + calLink + ' slide, ' + fw + ' (week of ' + fmtYmd_(ctx.weekStart) + ')</b></p>' +
+    '<div style="background:#EAF3FF;border:1px solid #C9DFFB;padding:8px 12px;margin:0 0 10px;font-size:13px;">' +
+    '<b>Don\'t see a test you expected?</b> Make sure (a) it\'s in the <a href="' + ctx.ss.getUrl() + '">experimentation repository</a> and ' +
+    '(b) it has an existing Jira ticket, so the Audience team can properly track it and create its test tracker.</div>' +
+    '<p style="font-size:12px;color:#555;margin:0 0 12px;">Copy a cell into the matching row of the slide table, or copy the whole table. ' +
+    'The wording comes from each test\'s Description, so give it a quick edit. Anything in [brackets] needs your input.</p>';
+
+  let text = subject + '\n' + (CONFIG.CALENDAR_URL ? 'Experimentation Calendar: ' + CONFIG.CALENDAR_URL + '\n' : '') + '\n' +
+    "Don't see a test you expected? Make sure (a) it's in the experimentation repository and (b) it has an existing Jira ticket, " +
+    'so the Audience team can properly track it and create its test tracker.\n\n';
 
   html += '<table style="border-collapse:collapse;width:100%;font-family:' + font + ';font-size:13px;">';
-  let text = subject + '\n\n';
   Object.keys(SECTION_STYLE_).forEach(function (k) {
     const st = SECTION_STYLE_[k];
     html += '<tr><td colspan="2" style="background:' + st.color + ';color:#FFFFFF;font-weight:bold;padding:4px 8px;border:' + border + ';">' + st.title + '</td></tr>';
@@ -692,18 +775,19 @@ function composeSummary_(ctx, s, topNote) {
       return;
     }
     s[k].forEach(function (it) {
-      const team = it.row.team || CONFIG.DEFAULT_TEAM;
       const link = it.row.link || rowUrl_(ctx, it.row);
       const body = escapeHtml_(it.text).replace(/\[([^\]]+)\]/g, '<span style="background:#FFF2CC;">[$1]</span>');
-      html += '<tr><td style="padding:6px 8px;border:' + border + ';width:110px;vertical-align:middle;">' + escapeHtml_(team) + '</td>' +
+      html += '<tr><td style="padding:6px 8px;border:' + border + ';width:110px;vertical-align:middle;">' + escapeHtml_(it.row.team) + '</td>' +
         '<td style="padding:6px 8px;border:' + border + ';line-height:1.4;"><a href="' + link + '" style="color:#3197FE;font-weight:bold;">' +
         escapeHtml_(it.row.name) + '</a><b>:</b> ' + body + '</td></tr>';
-      text += team + ' | ' + it.row.name + ': ' + it.text + '\n';
+      text += it.row.team + ' | ' + it.row.name + ': ' + it.text + '\n';
     });
     text += '\n';
   });
-  html += '</table><p style="font-size:12px;color:#777;margin-top:14px;">Covers the ' + escapeHtml_(CONFIG.TAB_NAME) +
-    ' tab only. Other teams\' rows still need to be added from their own sources.</p></div>';
+  const tabNames = s.tabs.used.map(function (t) { return t.sheet.getName(); });
+  html += '</table><p style="font-size:12px;color:#777;margin-top:14px;">Covers ' + tabNames.length + ' repository tab' +
+    (tabNames.length === 1 ? '' : 's') + ': ' + escapeHtml_(tabNames.join(', ')) + '.</p></div>';
+  text += 'Covers: ' + tabNames.join(', ');
   return { subject: subject, html: html, text: text };
 }
 
@@ -741,13 +825,14 @@ function setUpJira() {
   if (!ctx.cols.jira) {
     const col = ctx.sheet.getLastColumn() + 1;
     ctx.sheet.getRange(CONFIG.HEADER_ROW, col).setValue(CONFIG.COLUMNS.jira).setFontWeight('bold');
-    const prefill = ctx.rows.map(function (r) { return [r.jiraKeys.join(', ')]; });
     const numRows = ctx.sheet.getLastRow() - CONFIG.FIRST_DATA_ROW + 1;
     const values = [];
     for (let i = 0; i < numRows; i++) values.push(['']);
-    ctx.rows.forEach(function (r, j) { values[r.rowNumber - CONFIG.FIRST_DATA_ROW] = prefill[j]; });
+    let filled = 0;
+    ctx.rows.forEach(function (r) {
+      if (r.jiraKeys.length) { values[r.rowNumber - CONFIG.FIRST_DATA_ROW] = [r.jiraKeys.join(', ')]; filled++; }
+    });
     if (numRows > 0) ctx.sheet.getRange(CONFIG.FIRST_DATA_ROW, col, numRows, 1).setValues(values);
-    const filled = prefill.filter(function (p) { return p[0]; }).length;
     notes.push('Added a "' + CONFIG.COLUMNS.jira + '" column (column ' + colLetter_(col) + ') and filled in ' + filled +
       ' ticket(s) found in the Experiment Plan text.');
     ctx = loadContext_();
@@ -1090,7 +1175,7 @@ function htmlTable_(heads, rows, wrapCol) {
 }
 
 function repoUrl_(ctx) { return ctx.ss.getUrl() + '#gid=' + ctx.sheet.getSheetId(); }
-function rowUrl_(ctx, r) { return repoUrl_(ctx) + '&range=A' + r.rowNumber; }
+function rowUrl_(ctx, r) { return ctx.ss.getUrl() + '#gid=' + (r.sheetId != null ? r.sheetId : ctx.sheet.getSheetId()) + '&range=A' + r.rowNumber; }
 function lowerList_(list) { return list.map(function (s) { return String(s).trim().toLowerCase(); }); }
 function pad2_(n) { return (n < 10 ? '0' : '') + n; }
 function quoteSheet_(name) { return "'" + String(name).replace(/'/g, "''") + "'"; }
